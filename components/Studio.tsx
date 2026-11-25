@@ -151,6 +151,8 @@ export function Studio({ initialCredits, initialError }: { initialCredits: Credi
   const [jobs, setJobs] = useState<Job[]>([]);
   const [now, setNow] = useState(() => Date.now());
   const [results, setResults] = useState<LocalItem[]>([]);
+  const [globalItems, setGlobalItems] = useState<GalleryItem[]>([]);
+  const [showMine, setShowMine] = useState(false);
   const [current, setCurrent] = useState<LocalItem | null>(null);
 
   const [query, setQuery] = useState("");
@@ -177,6 +179,9 @@ export function Studio({ initialCredits, initialError }: { initialCredits: Credi
 
     const history = readLocal<unknown[]>(HISTORY_KEY, []).filter(isLocalItem);
     setResults(history);
+    void api<{ results: GalleryItem[] }>("/api/results?limit=120")
+      .then((data) => setGlobalItems(Array.isArray(data.results) ? data.results : []))
+      .catch(() => {});
     if (history.length) {
       void api("/api/results/sync", {
         method: "POST",
@@ -383,6 +388,7 @@ export function Studio({ initialCredits, initialError }: { initialCredits: Credi
     (job: Job, item: GalleryItem) => {
       const local: LocalItem = { ...item, jobId: job.jobId };
       setResults((list) => [local, ...list.filter((r) => r.jobId !== job.jobId)]);
+      setGlobalItems((list) => [item, ...list.filter((r) => r.id !== item.id)]);
       setCurrent(local);
       setJobs((list) => list.filter((j) => j.jobId !== job.jobId));
       toast(`สร้างเสร็จใน ${fmtDur(Date.now() - job.startedAt)}`, "ok");
@@ -509,21 +515,32 @@ export function Studio({ initialCredits, initialError }: { initialCredits: Credi
     };
   }, [finishJob, hasRunning, loadCredits]);
 
-  /* ── gallery (local history only) ───────────────────────── */
+  /* ── gallery: history รวม + ตัวกรอง "เฉพาะของฉัน" ─────────── */
+  const mineIds = useMemo(() => new Set(results.map((r) => r.id)), [results]);
+
+  const allItems = useMemo(() => {
+    const map = new Map<number, GalleryItem>();
+    globalItems.forEach((item) => map.set(item.id, item));
+    results.forEach((item) => map.set(item.id, item));
+    return [...map.values()].sort((a, b) => b.createdAt - a.createdAt);
+  }, [globalItems, results]);
+
+  const source = showMine ? results : allItems;
+
   const gallery = useMemo(() => {
     const q = query.trim().toLowerCase();
-    return results.filter(
+    return source.filter(
       (r) =>
         (galleryModel === "all" || r.modelId === galleryModel) &&
         (!q || r.prompt.toLowerCase().includes(q) || r.modelLabel.toLowerCase().includes(q)),
     );
-  }, [galleryModel, query, results]);
+  }, [galleryModel, query, source]);
 
   const modelOptions = useMemo(() => {
     const seen = new Map<string, string>();
-    results.forEach((r) => seen.set(r.modelId, r.modelLabel));
+    source.forEach((r) => seen.set(r.modelId, r.modelLabel));
     return [...seen.entries()];
-  }, [results]);
+  }, [source]);
 
   const openLightbox = (item: GalleryItem) => {
     const i = gallery.findIndex((r) => r.id === item.id);
@@ -851,7 +868,7 @@ export function Studio({ initialCredits, initialError }: { initialCredits: Credi
                   <h3>ยังไม่มีภาพในรอบนี้</h3>
                   <p>
                     เขียนพรอมป์ทางซ้ายแล้วกด “สร้างภาพ” — ภาพที่สร้างจะแสดงที่นี่และเก็บประวัติไว้ในเครื่องนี้
-                    {results.length > 0 ? " (ภาพเก่าอยู่ใน “ภาพทั้งหมด” ด้านล่าง)" : ""}
+                    {results.length > 0 ? " (ประวัติอยู่ด้านล่าง)" : ""}
                   </p>
                   <div className="ideas">
                     {IDEAS.map((idea) => (
@@ -974,8 +991,16 @@ export function Studio({ initialCredits, initialError }: { initialCredits: Credi
           <div className="panel-head">
             <span className="panel-idx">03</span>
             <h2 className="panel-title" id="sheet-title">
-              ภาพทั้งหมดของฉัน
+              ประวัติการสร้าง
             </h2>
+            <div className="seg" role="group" aria-label="ขอบเขตประวัติที่แสดง">
+              <button aria-pressed={!showMine} onClick={() => setShowMine(false)}>
+                ทั้งหมด
+              </button>
+              <button aria-pressed={showMine} onClick={() => setShowMine(true)}>
+                เฉพาะของฉัน
+              </button>
+            </div>
             <span className="chip">
               <Grid /> {fmtNum(gallery.length)} ภาพ
             </span>
@@ -1019,8 +1044,10 @@ export function Studio({ initialCredits, initialError }: { initialCredits: Credi
             {gallery.length === 0 ? (
               <div className="empty">
                 <Film />
-                {results.length === 0
-                  ? "ยังไม่มีประวัติในเครื่องนี้ — ภาพที่สร้างจะถูกเก็บไว้ในเบราว์เซอร์นี้คนเดียว"
+                {source.length === 0
+                  ? showMine
+                    ? "ยังไม่มีภาพของคุณในเครื่องนี้ — ภาพที่คุณสร้างจะถูกเก็บไว้ในเบราว์เซอร์นี้"
+                    : "ยังไม่มีภาพในระบบ"
                   : "ไม่พบภาพที่ตรงกับคำค้นหรือตัวกรองนี้"}
               </div>
             ) : (
@@ -1030,6 +1057,7 @@ export function Studio({ initialCredits, initialError }: { initialCredits: Credi
                     <span className="cell-tag">
                       <span className="tag chem">{item.aspect}</span>
                       {item.refCount > 0 && <span className="tag ref">{item.refCount} ref</span>}
+                      {!showMine && mineIds.has(item.id) && <span className="tag ok">ของฉัน</span>}
                     </span>
                     {/* eslint-disable-next-line @next/next/no-img-element */}
                     <img className="cell-img" src={item.url} alt={item.prompt.slice(0, 120)} loading="lazy" />
@@ -1055,7 +1083,7 @@ export function Studio({ initialCredits, initialError }: { initialCredits: Credi
           <i className="sep" />
           <span>เครดิตทุกบัญชีรีเซ็ต 11:00 น. เวลาไทย</span>
           <i className="sep" />
-          <span className="foot-note">ประวัติภาพเก็บในเบราว์เซอร์นี้ · เซิร์ฟเวอร์เก็บไว้ให้แอดมิน</span>
+          <span className="foot-note">ประวัติภาพรวมจากเซิร์ฟเวอร์ · ภาพของคุณเก็บเพิ่มในเบราว์เซอร์นี้</span>
           <span style={{ marginLeft: "auto" }}>
             <Link className="textlink" href="/admin">
               <Lock /> ผู้ดูแลระบบ
