@@ -14,7 +14,7 @@ export async function POST(_req: Request, ctx: { params: Promise<{ id: string }>
     const row = await getToken(tokenId);
     if (!row) throw new HttpError(404, "ไม่พบ token นี้");
     if (!canRenew(row)) {
-      throw new HttpError(400, "บัญชีนี้รี token อัตโนมัติไม่ได้ (รองรับเฉพาะ @grabmail.io)");
+      throw new HttpError(400, "บัญชีนี้รี token อัตโนมัติไม่ได้ (รองรับเฉพาะอีเมล Grabmail)");
     }
 
     const renewed = await renewToken(row);

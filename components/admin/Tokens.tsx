@@ -2,6 +2,7 @@
 
 import { useMemo, useRef, useState } from "react";
 import { MIN_COST, resetDayKey } from "@/lib/models";
+import { isGrabmailAddress } from "@/lib/mail-domains";
 import {
   Alert,
   Check,
@@ -36,8 +37,8 @@ const statusOf = (t: AdminToken) =>
   !t.enabled ? { label: "ปิดใช้", cls: "off" } : STATUS[t.status] || STATUS.unknown;
 
 export const accountName = (t: AdminToken) => t.account_email || `บัญชี #${t.id}`;
-/** รี token อัตโนมัติได้เฉพาะอีเมลควบคุมได้ผ่าน Grabmail */
-const renewable = (t: AdminToken) => /@grabmail\.io$/i.test(t.account_email || "");
+/** รี token อัตโนมัติได้เฉพาะอีเมลที่อ่านกล่องได้ผ่าน Grabmail */
+const renewable = (t: AdminToken) => isGrabmailAddress(t.account_email);
 
 export function Tokens({
   tokens,
@@ -216,7 +217,7 @@ export function Tokens({
         body:
           targets.length === 1
             ? "ระบบจะขอ OTP ใหม่ อ่านเมลจาก Grabmail อัตโนมัติ แล้วแทนที่ token เดิมด้วยตัวที่อายุยาวขึ้น"
-            : "ทำพร้อมกัน 5 บัญชี (ขอ OTP + อ่านเมลอัตโนมัติ) — บัญชีที่ไม่ใช่ @grabmail.io จะถูกข้าม",
+            : "ทำพร้อมกัน 5 บัญชี (ขอ OTP + อ่านเมลอัตโนมัติ) — บัญชีที่ไม่ใช้อีเมล Grabmail จะถูกข้าม",
         okLabel: "เริ่มรี token",
       });
       if (!ok) return;
@@ -563,7 +564,7 @@ export function Tokens({
         <span className="mono" style={{ color: "var(--paper-3)" }}>
           <Sort style={{ width: 12, height: 12, verticalAlign: -2 }} /> {rows.length} token จากทั้งหมด {tokens.length} ·{" "}
           {summary?.accounts ?? 0} บัญชี · เครดิตรวมจริง {fmtNum(summary?.total)} · รีเซ็ตทุกวัน 11:00 น.
-          <span style={{ color: "var(--paper-4)" }}> · รี token อัตโนมัติได้เฉพาะ @grabmail.io</span>
+          <span style={{ color: "var(--paper-4)" }}> · รี token อัตโนมัติได้เฉพาะอีเมล Grabmail</span>
           {renewNote && <span style={{ color: "var(--paper)" }}> · {renewNote}</span>}
         </span>
       </div>
@@ -795,8 +796,9 @@ function AddTokens({
               data-autofocus
             />
             <p className="help">
-              สร้างพร้อมกัน 5 บัญชีต่อรอบ · อีเมลสุ่ม <span className="mono">@grabmail.io</span> + ยืนยัน OTP
-              อัตโนมัติ · ประมาณ 10–40 วินาทีต่อรอบ
+              สร้างอีเมลชั่วคราวจาก Grabmail (<span className="mono">linqmail.com</span> /{" "}
+              <span className="mono">mixozia.com</span>) แล้วยืนยัน OTP อัตโนมัติ · สร้างพร้อมกัน 5 บัญชีต่อรอบ ·
+              ประมาณ 10–40 วินาทีต่อรอบ
             </p>
           </div>
 
@@ -834,8 +836,8 @@ function AddTokens({
           <div className="alert warn">
             <Alert />
             <span>
-              บัญชีที่สร้างจะได้เครดิตเริ่มต้นจาก Overchat และรีเซ็ตเดลีทุกวัน 11:00 น. · รี token ภายหลังได้เฉพาะบัญชี{" "}
-              <span className="mono">@grabmail.io</span> (ตามที่ระบบสร้างให้)
+              บัญชีที่สร้างจะได้เครดิตเริ่มต้นจาก Overchat และรีเซ็ตเดลีทุกวัน 11:00 น. · รี token ภายหลังได้เฉพาะอีเมล
+              Grabmail ที่ระบบสร้างให้
             </span>
           </div>
         </>

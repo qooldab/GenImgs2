@@ -1,19 +1,19 @@
 import { jwtExpiry, q, TOKEN_COLS, type TokenRow } from "./db";
 import { extractOtp, readMailbox, readMessage } from "./grabmail";
 import { HttpError } from "./http";
+import { isGrabmailAddress } from "./mail-domains";
 import { sendEmailCode, verifyEmailCode } from "./overchat";
 
-const RENEWABLE = /@grabmail\.io$/i;
 const WAIT_MS = 30_000;
 const POLL_MS = 3000;
 
-export const canRenew = (t: TokenRow) => RENEWABLE.test(t.account_email || "");
+export const canRenew = (t: TokenRow) => isGrabmailAddress(t.account_email);
 
 /** ล็อกอินบัญชีเดิมซ้ำ (OTP ทาง Grabmail) เพื่อออก token ใหม่ที่อายุยาวขึ้น */
 export async function renewToken(row: TokenRow) {
   const email = row.account_email || "";
   if (!canRenew(row)) {
-    throw new HttpError(400, "รี token อัตโนมัติได้เฉพาะบัญชี @grabmail.io — บัญชีอื่นปล่อยให้หมดอายุได้");
+    throw new HttpError(400, "รี token อัตโนมัติได้เฉพาะอีเมล Grabmail (linqmail.com / mixozia.com)");
   }
 
   const before = new Set(

@@ -1,27 +1,22 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { jwtClaims, q, TOKEN_COLS, type TokenRow } from "./db";
-import { extractOtp, grabDomains, readMailbox, readMessage } from "./grabmail";
+import { extractOtp, pickMailDomains, readMailbox, readMessage } from "./grabmail";
 import { HttpError } from "./http";
-import { sendEmailCode, verifyEmailCode } from "./overchat";
+import { sendEmailCode, UpstreamError, verifyEmailCode } from "./overchat";
 
 const WAIT_MS = 30_000;
 const POLL_MS = 3000;
 
-async function freshMailbox(): Promise<string> {
-  const domains = await grabDomains();
-  if (!domains.includes("grabmail.io")) {
-    throw new HttpError(502, "Grabmail ปิดโดเมน grabmail.io อยู่ ลองใหม่ภายหลัง");
-  }
+async function freshMailbox(domain: string): Promise<string> {
   for (let i = 0; i < 3; i++) {
-    const address = `oc${randomBytes(12).toString("hex")}@grabmail.io`;
+    const address = `oc${randomBytes(12).toString("hex")}@${domain}`;
     if (!(await readMailbox(address)).length) return address;
   }
-  throw new HttpError(502, "สุ่มอีเมลว่างไม่สำเร็จ ลองใหม่อีกครั้ง");
+  throw new HttpError(502, `สุ่มอีเมลว่างบน ${domain} ไม่สำเร็จ ลองใหม่อีกครั้ง`);
 }
 
-/** สมัครบัญชีใหม่ด้วยอีเมล Grabmail แล้วยืนยัน OTP จนได้ token กลับมา */
-export async function createAccount(): Promise<TokenRow> {
-  const email = await freshMailbox();
+async function registerOn(domain: string): Promise<TokenRow> {
+  const email = await freshMailbox(domain);
   const deviceUuid = randomUUID();
   const requestedAt = Date.now();
   await sendEmailCode(email, deviceUuid);
@@ -36,7 +31,7 @@ export async function createAccount(): Promise<TokenRow> {
       if (code) break;
     }
   }
-  if (!code) throw new HttpError(504, "รอ OTP 40 วินาทีแล้วยังไม่ได้รับเมล — ลองสร้างบัญชีใหม่");
+  if (!code) throw new HttpError(504, `รอ OTP 30 วินาทีแล้วยังไม่ได้รับเมลจาก ${domain} — ลองสร้างบัญชีใหม่`);
 
   const accessToken = await verifyEmailCode(email, code, deviceUuid);
   const claims = jwtClaims(accessToken);
@@ -48,4 +43,23 @@ export async function createAccount(): Promise<TokenRow> {
     [accessToken, exp ? exp.toISOString() : null, claims.sub ?? null, email, deviceUuid],
   );
   return rows[0];
+}
+
+/** สมัครบัญชีใหม่ด้วยอีเมล Grabmail แล้วยืนยัน OTP จนได้ token กลับมา (สลับโดเมนถ้าปลายทางไม่รับ) */
+export async function createAccount(): Promise<TokenRow> {
+  const domains = await pickMailDomains();
+  if (!domains.length) throw new HttpError(502, "Grabmail ไม่ได้เปิดโดเมนสาธารณะให้ใช้งานตอนนี้");
+
+  let lastError: unknown = null;
+  for (const domain of domains) {
+    try {
+      return await registerOn(domain);
+    } catch (err) {
+      lastError = err;
+      // 422 = Overchat ไม่รับอีเมลโดเมนนี้ → ลองโดเมนถัดไป (ไม่ใช่ rate limit)
+      if (err instanceof UpstreamError && err.status === 422) continue;
+      throw err;
+    }
+  }
+  throw lastError instanceof Error ? lastError : new HttpError(502, "สร้างบัญชีไม่สำเร็จ ลองใหม่ภายหลัง");
 }

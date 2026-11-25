@@ -54,6 +54,9 @@ async function errorFor(res: Response, fallback: string) {
     413: "ไฟล์ใหญ่เกินที่เซิร์ฟเวอร์รับ (413)",
     429: "ยิงถี่เกินไป รอสักครู่แล้วลองใหม่ (429)",
   };
+  if (res.status === 422 && /not supported/i.test(detail)) {
+    return new UpstreamError("Overchat ไม่รับอีเมลโดเมนนี้แล้ว (ถูกบล็อก) — ต้องใช้โดเมนอื่น", 422);
+  }
   return new UpstreamError(map[res.status] || `${fallback} (HTTP ${res.status}) ${detail}`.trim(), res.status);
 }
 

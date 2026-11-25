@@ -1,4 +1,6 @@
-/** อ่านกล่องจดหมาย Grabmail (เฉพาะอีเมล @grabmail.io ที่มีอยู่จริง) เพื่อขอ OTP ใหม่ให้บัญชีเดิม */
+/** อ่านกล่องจดหมาย Grabmail (เฉพาะอีเมลบนโดเมนที่ Grabmail เปิดให้) เพื่อขอ OTP ใหม่ให้บัญชีเดิม */
+import { MAIL_FALLBACK_DOMAINS } from "./mail-domains";
+
 const BASE = "https://grabmail.io/api/v1";
 
 export type GrabMail = {
@@ -41,6 +43,14 @@ export const readMessage = (id: string, mailbox: string) =>
 export async function grabDomains(): Promise<string[]> {
   const data = await getJson<{ public?: unknown }>("/domains");
   return Array.isArray(data.public) ? (data.public as string[]).filter((d) => typeof d === "string") : [];
+}
+
+/** โดเมนที่ลองใช้: เอาที่ Overchat เคยรับก่อน แล้วต่อด้วยโดเมนอื่นที่ Grabmail เปิดอยู่ */
+export async function pickMailDomains(): Promise<string[]> {
+  const live = await grabDomains();
+  const preferred = MAIL_FALLBACK_DOMAINS.filter((d) => live.includes(d));
+  const rest = live.filter((d) => !MAIL_FALLBACK_DOMAINS.includes(d));
+  return [...new Set([...preferred, ...rest])];
 }
 
 const mailTime = (m: GrabMail) => {
