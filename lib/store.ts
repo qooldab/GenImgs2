@@ -248,7 +248,9 @@ export async function createResult(input: {
 }) {
   const rows = await q<ResultRow>(
     `insert into results (job_id, prompt, model_id, model_label, aspect, resolution, cost, token_id, refs, status)
-     values ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,'pending') returning ${RESULT_COLS}`,
+     values ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,'pending')
+     on conflict (job_id) do update set job_id = excluded.job_id
+     returning ${RESULT_COLS}`,
     [
       input.jobId,
       input.prompt,

@@ -5,8 +5,23 @@ if (!url) throw new Error("DATABASE_URL is not set");
 
 export const sql = neon(url);
 
-export const q = <T = Record<string, unknown>>(text: string, params: unknown[] = []) =>
-  sql.query(text, params) as unknown as Promise<T[]>;
+const TRANSIENT = /fetch failed|ECONNRESET|ETIMEDOUT|EAI_AGAIN|terminated|connecting to database|network/i;
+
+/** Neon ผ่าน HTTP เป็นระยะ ๆ — ลองซ้ำเฉพาะ error เครือข่าย ก่อนปล่อยผ่าน */
+export async function q<T = Record<string, unknown>>(text: string, params: unknown[] = []): Promise<T[]> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      return (await sql.query(text, params)) as unknown as T[];
+    } catch (err) {
+      lastError = err;
+      const message = String((err as Error)?.message || err);
+      if (attempt === 2 || !TRANSIENT.test(message)) throw err;
+      await new Promise((r) => setTimeout(r, 350 + attempt * 650));
+    }
+  }
+  throw lastError;
+}
 
 export type TokenRow = {
   id: number;

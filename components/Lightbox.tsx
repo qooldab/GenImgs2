@@ -48,7 +48,7 @@ export function Lightbox({
             <Clip style={{ width: 9, height: 9, verticalAlign: -1 }} /> {item.refCount} อ้างอิง
           </span>
         )}
-        <span className="p">{item.prompt}</span>
+        <span style={{ marginLeft: "auto" }} />
         <button className="iconbtn sm" onClick={onClose} aria-label="ปิดภาพขยาย">
           <X />
         </button>
@@ -56,7 +56,7 @@ export function Lightbox({
 
       <div className="lightbox-img">
         {/* eslint-disable-next-line @next/next/no-img-element */}
-        <img src={item.url} alt={item.prompt.slice(0, 160)} />
+        <img src={item.url} alt={item.prompt.slice(0, 160)} title={item.prompt} />
         {items.length > 1 && (
           <>
             <button
