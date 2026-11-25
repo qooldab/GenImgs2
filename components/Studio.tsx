@@ -29,6 +29,7 @@ import {
   Pencil,
   Refresh,
   Search,
+  Trash,
   Upload,
   X,
   Zap,
@@ -60,6 +61,7 @@ type Ref = {
 };
 
 type Job = {
+  key: string;
   jobId: string;
   prompt: string;
   modelId: string;
@@ -68,14 +70,19 @@ type Job = {
   cost: number;
   startedAt: number;
   refCount: number;
+  status: "sending" | "running" | "failed";
+  error?: string;
 };
 
-type Phase = "idle" | "sending" | "developing" | "failed";
+type LocalItem = GalleryItem & { jobId: string };
 
-const JOB_KEY = "genimgs.job";
+const JOB_KEY = "genimgs.jobs.v1";
+const HISTORY_KEY = "genimgs.history.v1";
 const DRAFT_KEY = "genimgs.draft";
 const PREF_KEY = "genimgs.prefs";
 const JOB_TTL = 15 * 60_000;
+const MAX_JOBS = 5;
+const HISTORY_MAX = 200;
 
 const ASPECT_BOX: Record<string, [number, number]> = {
   "1:1": [22, 22],
@@ -106,6 +113,11 @@ const IDEAS = [
   },
 ];
 
+const isLocalItem = (x: unknown): x is LocalItem => {
+  const v = x as LocalItem;
+  return !!v && typeof v.url === "string" && typeof v.prompt === "string" && typeof v.jobId === "string";
+};
+
 function ResetChip({ nextResetAt }: { nextResetAt: number }) {
   const [, tick] = useState(0);
   useEffect(() => {
@@ -113,22 +125,18 @@ function ResetChip({ nextResetAt }: { nextResetAt: number }) {
     return () => clearInterval(id);
   }, []);
   return (
-    <span className="chip resetchip" title="เครดิตของทุกบัญชีรีเซ็ตทุกวันเวลา 11:00 น. ตามเวลาไทย" suppressHydrationWarning>
+    <span
+      className="chip resetchip"
+      title="เครดิตของทุกบัญชีรีเซ็ตทุกวันเวลา 11:00 น. ตามเวลาไทย"
+      suppressHydrationWarning
+    >
       <Clock /> รีเซ็ตใน {fmtUntil(nextResetAt)}
     </span>
   );
 }
 
-export function Studio({
-  initialCredits,
-  initialResults,
-  initialError,
-}: {
-  initialCredits: Credits | null;
-  initialResults: GalleryItem[];
-  initialError?: string;
-}) {
-  const { toast } = useUI();
+export function Studio({ initialCredits, initialError }: { initialCredits: Credits | null; initialError?: string }) {
+  const { toast, confirm } = useUI();
 
   const [credits, setCredits] = useState<Credits | null>(initialCredits);
   const [creditErr, setCreditErr] = useState<string | null>(initialError || null);
@@ -140,13 +148,11 @@ export function Studio({
   const [refs, setRefs] = useState<Ref[]>([]);
   const [dragging, setDragging] = useState(false);
 
-  const [phase, setPhase] = useState<Phase>("idle");
-  const [job, setJob] = useState<Job | null>(null);
-  const [jobError, setJobError] = useState<string | null>(null);
-  const [elapsed, setElapsed] = useState(0);
-  const [current, setCurrent] = useState<GalleryItem | null>(initialResults[0] || null);
+  const [jobs, setJobs] = useState<Job[]>([]);
+  const [now, setNow] = useState(() => Date.now());
+  const [results, setResults] = useState<LocalItem[]>([]);
+  const [current, setCurrent] = useState<LocalItem | null>(null);
 
-  const [results, setResults] = useState<GalleryItem[]>(initialResults);
   const [query, setQuery] = useState("");
   const [galleryModel, setGalleryModel] = useState("all");
   const [lightbox, setLightbox] = useState<number | null>(null);
@@ -157,30 +163,63 @@ export function Studio({
   const rawFiles = useRef(new Map<string, File>());
   const previews = useRef(new Set<string>());
   const pinToken = useRef<number | null>(null);
+  const jobsRef = useRef<Job[]>([]);
+  const hydrated = useRef(false);
   const retried = useRef(false);
-  const lastRequest = useRef<{ prompt: string; modelId: string; aspect: string } | null>(null);
   const spec = getModel(modelId) || MODELS[0];
 
-  /* ── restore draft / prefs / unfinished job ─────────────── */
+  /* ── restore prefs / draft / own history / unfinished jobs ── */
   useEffect(() => {
     const prefs = readLocal(PREF_KEY, { modelId: MODELS[0].id as string, aspect: "16:9" });
     if (getModel(prefs.modelId)) setModelId(prefs.modelId);
     if (ASPECTS.includes(prefs.aspect as (typeof ASPECTS)[number])) setAspect(prefs.aspect);
     setPrompt(readLocal(DRAFT_KEY, ""));
-    const saved = readLocal<Job | null>(JOB_KEY, null);
-    if (saved?.jobId && Date.now() - saved.startedAt < JOB_TTL) {
-      setJob(saved);
-      setPhase("developing");
-    } else if (saved) {
-      writeLocal(JOB_KEY, null);
+
+    const history = readLocal<unknown[]>(HISTORY_KEY, []).filter(isLocalItem);
+    setResults(history);
+    if (history.length) {
+      void api("/api/results/sync", {
+        method: "POST",
+        json: {
+          items: history.slice(0, 30).map((r) => ({
+            jobId: r.jobId,
+            url: r.url,
+            prompt: r.prompt,
+            modelId: r.modelId,
+            aspect: r.aspect,
+            cost: r.cost,
+            createdAt: r.createdAt,
+          })),
+        },
+      }).catch(() => {});
     }
+
+    const saved = readLocal<Job[]>(JOB_KEY, []).filter(
+      (j) => j?.jobId && j.status === "running" && Date.now() - j.startedAt < JOB_TTL,
+    );
+    if (saved.length) setJobs(saved);
   }, []);
 
+  useEffect(() => {
+    jobsRef.current = jobs;
+  }, [jobs]);
+
   useEffect(() => writeLocal(PREF_KEY, { modelId, aspect }), [modelId, aspect]);
+
   useEffect(() => {
     const id = setTimeout(() => writeLocal(DRAFT_KEY, prompt), 400);
     return () => clearTimeout(id);
   }, [prompt]);
+
+  useEffect(() => {
+    if (!hydrated.current) {
+      hydrated.current = true;
+      return;
+    }
+    writeLocal(HISTORY_KEY, results.slice(0, HISTORY_MAX));
+  }, [results]);
+
+  useEffect(() => writeLocal(JOB_KEY, jobs.filter((j) => j.status === "running" && j.jobId)), [jobs]);
 
   useEffect(() => {
     const set = previews.current;
@@ -188,25 +227,22 @@ export function Studio({
   }, []);
 
   /* ── credits ────────────────────────────────────────────── */
-  const loadCredits = useCallback(
-    async (force = false) => {
-      setRefreshing(true);
-      try {
-        const data = await api<Credits & { refreshing?: boolean }>(`/api/credits${force ? "?refresh=1" : ""}`);
-        setCredits(data);
-        setCreditErr(null);
-        if (data.refreshing && !retried.current) {
-          retried.current = true;
-          setTimeout(() => void loadCredits(), 4000);
-        }
-      } catch (err) {
-        setCreditErr(err instanceof Error ? err.message : "โหลดเครดิตไม่สำเร็จ");
-      } finally {
-        setRefreshing(false);
+  const loadCredits = useCallback(async (force = false) => {
+    setRefreshing(true);
+    try {
+      const data = await api<Credits & { refreshing?: boolean }>(`/api/credits${force ? "?refresh=1" : ""}`);
+      setCredits(data);
+      setCreditErr(null);
+      if (data.refreshing && !retried.current) {
+        retried.current = true;
+        setTimeout(() => void loadCredits(), 4000);
       }
-    },
-    [],
-  );
+    } catch (err) {
+      setCreditErr(err instanceof Error ? err.message : "โหลดเครดิตไม่สำเร็จ");
+    } finally {
+      setRefreshing(false);
+    }
+  }, []);
 
   useEffect(() => {
     void loadCredits();
@@ -227,7 +263,9 @@ export function Studio({
         pinToken.current = data.tokenId;
         setRefs((list) =>
           list.map((r) =>
-            r.key === key ? { ...r, state: "ready", link: data.link, thumb: data.thumb, tokenId: data.tokenId, error: undefined } : r,
+            r.key === key
+              ? { ...r, state: "ready", link: data.link, thumb: data.thumb, tokenId: data.tokenId, error: undefined }
+              : r,
           ),
         );
       } catch (err) {
@@ -318,13 +356,15 @@ export function Studio({
     [addFiles, refs.length, spec.label, spec.maxFiles, toast],
   );
 
-  /* ── generate + poll ────────────────────────────────────── */
-  const busy = phase === "sending" || phase === "developing";
+  /* ── jobs ───────────────────────────────────────────────── */
+  const running = useMemo(() => jobs.filter((j) => j.status !== "failed"), [jobs]);
+  const focus = running.length ? running[running.length - 1] : null;
   const uploading = refs.some((r) => r.state === "uploading");
   const brokenRefs = refs.some((r) => r.state === "error");
   const overCount = Math.max(0, refs.length - spec.maxFiles);
   const shortCredits = !!credits?.known && credits.total < spec.cost;
-  const canGo = !!prompt.trim() && !busy && !uploading && !brokenRefs && !shortCredits && overCount === 0;
+  const canAdd = running.length < MAX_JOBS;
+  const canGo = !!prompt.trim() && !uploading && !brokenRefs && !shortCredits && overCount === 0 && canAdd;
 
   const trimRefs = useCallback(() => {
     setRefs((list) => {
@@ -339,131 +379,137 @@ export function Studio({
     });
   }, [spec.maxFiles]);
 
-  const runGeneration = useCallback(
-    async (text: string, mId: string, asp: string) => {
-      const model = getModel(mId) || MODELS[0];
-      const ready = refs.filter((r) => r.state === "ready" && r.link).slice(0, model.maxFiles);
-      lastRequest.current = { prompt: text, modelId: model.id, aspect: asp };
-      setPhase("sending");
-      setJobError(null);
-      try {
-        const data = await api<{ jobId: string; cost: number; modelLabel: string; aspect: string }>("/api/generate", {
-          method: "POST",
-          json: {
-            prompt: text,
-            modelId: model.id,
-            aspect: asp,
-            refs: ready.map((r) => ({ link: r.link, name: r.name, thumb: r.thumb, tokenId: r.tokenId })),
-          },
-        });
-        const next: Job = {
-          jobId: data.jobId,
-          prompt: text,
-          modelId: model.id,
-          modelLabel: data.modelLabel,
-          aspect: data.aspect,
-          cost: data.cost,
-          startedAt: Date.now(),
-          refCount: ready.length,
-        };
-        setJob(next);
-        writeLocal(JOB_KEY, next);
-        setElapsed(0);
-        setPhase("developing");
-        void loadCredits();
-      } catch (err) {
-        setPhase("failed");
-        setJobError(err instanceof Error ? err.message : "ส่งคำสั่งสร้างภาพไม่สำเร็จ");
-        void loadCredits();
-      }
-    },
-    [loadCredits, refs],
-  );
-
-  const submit = useCallback(() => {
-    const text = prompt.trim();
-    if (!text || busy) return;
-    void runGeneration(text, spec.id, aspect);
-  }, [aspect, busy, prompt, runGeneration, spec.id]);
-
-  const finish = useCallback(
-    (item: GalleryItem, ms: number) => {
-      setCurrent(item);
-      setResults((list) => [item, ...list.filter((r) => r.id !== item.id)]);
-      setJob(null);
-      writeLocal(JOB_KEY, null);
-      setPhase("idle");
-      toast(`สร้างภาพเสร็จใน ${fmtDur(ms)}`, "ok");
+  const finishJob = useCallback(
+    (job: Job, item: GalleryItem) => {
+      const local: LocalItem = { ...item, jobId: job.jobId };
+      setResults((list) => [local, ...list.filter((r) => r.jobId !== job.jobId)]);
+      setCurrent(local);
+      setJobs((list) => list.filter((j) => j.jobId !== job.jobId));
+      toast(`สร้างเสร็จใน ${fmtDur(Date.now() - job.startedAt)}`, "ok");
       void loadCredits();
     },
     [loadCredits, toast],
   );
 
+  const run = useCallback(
+    (text: string, mId: string, asp: string) => {
+      if (jobsRef.current.filter((j) => j.status !== "failed").length >= MAX_JOBS) {
+        toast(`สร้างพร้อมกันได้สูงสุด ${MAX_JOBS} งาน — รอให้งานหนึ่งเสร็จก่อน`, "warn");
+        return;
+      }
+      const model = getModel(mId) || MODELS[0];
+      const ready = refs.filter((r) => r.state === "ready" && r.link).slice(0, model.maxFiles);
+      const key = `j${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+      const job: Job = {
+        key,
+        jobId: "",
+        prompt: text,
+        modelId: model.id,
+        modelLabel: model.label,
+        aspect: asp,
+        cost: model.cost,
+        startedAt: Date.now(),
+        refCount: ready.length,
+        status: "sending",
+      };
+      setJobs((list) => [...list, job]);
+
+      api<{ jobId: string }>("/api/generate", {
+        method: "POST",
+        json: {
+          prompt: text,
+          modelId: model.id,
+          aspect: asp,
+          refs: ready.map((r) => ({ link: r.link, name: r.name, thumb: r.thumb, tokenId: r.tokenId })),
+        },
+      })
+        .then((data) =>
+          setJobs((list) =>
+            list.map((j) =>
+              j.key === key ? { ...j, jobId: data.jobId, status: "running", startedAt: Date.now() } : j,
+            ),
+          ),
+        )
+        .catch((err) => {
+          const msg = err instanceof Error ? err.message : "ส่งคำสั่งสร้างภาพไม่สำเร็จ";
+          setJobs((list) => list.map((j) => (j.key === key ? { ...j, status: "failed", error: msg } : j)));
+          toast(msg, "bad");
+          void loadCredits();
+        });
+    },
+    [loadCredits, refs, toast],
+  );
+
+  const submit = useCallback(() => {
+    const text = prompt.trim();
+    if (!text || !canGo) return;
+    run(text, spec.id, aspect);
+  }, [aspect, canGo, prompt, run, spec.id]);
+
+  const retryJob = useCallback(
+    (job: Job) => {
+      setJobs((list) => list.filter((j) => j.key !== job.key));
+      run(job.prompt, job.modelId, job.aspect);
+    },
+    [run],
+  );
+
+  const dismissJob = (key: string) => setJobs((list) => list.filter((j) => j.key !== key));
+
   useEffect(() => {
-    if (!job || phase !== "developing") return;
+    if (!running.length) return;
+    setNow(Date.now());
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [running.length]);
+
+  const hasRunning = jobs.some((j) => j.status === "running" && j.jobId);
+  useEffect(() => {
+    if (!hasRunning) return;
     let stopped = false;
     let timer: ReturnType<typeof setTimeout>;
-    let errors = 0;
     let delay = 2500;
 
     const tick = async () => {
-      try {
-        const data = await api<{ status: string; url?: string; error?: string; result?: GalleryItem }>(
-          `/api/jobs/${encodeURIComponent(job.jobId)}`,
-        );
-        if (stopped) return;
-        errors = 0;
-        if (data.status === "completed" && data.result) {
-          finish(data.result, Date.now() - job.startedAt);
-          return;
-        }
-        if (data.status === "failed") {
-          setPhase("failed");
-          setJobError(data.error || "โมเดลสร้างภาพไม่สำเร็จ");
-          setJob(null);
-          writeLocal(JOB_KEY, null);
+      const active = jobsRef.current.filter((j) => j.status === "running" && j.jobId);
+      const responses = await Promise.all(
+        active.map(async (job) => {
+          try {
+            return {
+              job,
+              data: await api<{ status: string; error?: string; result?: GalleryItem }>(
+                `/api/jobs/${encodeURIComponent(job.jobId)}`,
+              ),
+            };
+          } catch (err) {
+            return { job, error: err instanceof Error ? err.message : "ติดต่อเซิร์ฟเวอร์ไม่ได้" };
+          }
+        }),
+      );
+      if (stopped) return;
+      for (const r of responses) {
+        if (r.data?.status === "completed" && r.data.result) {
+          finishJob(r.job, r.data.result);
+        } else if (r.data?.status === "failed") {
+          const msg = r.data.error || "โมเดลสร้างภาพไม่สำเร็จ";
+          setJobs((list) =>
+            list.map((j) => (j.jobId === r.job.jobId ? { ...j, status: "failed", error: msg } : j)),
+          );
           void loadCredits();
-          return;
-        }
-      } catch (err) {
-        if (stopped) return;
-        errors += 1;
-        if (errors >= 5) {
-          setPhase("failed");
-          setJobError(err instanceof Error ? err.message : "ติดต่อเซิร์ฟเวอร์ไม่ได้");
-          return;
         }
       }
       delay = Math.min(delay + 500, 5000);
       if (!stopped) timer = setTimeout(tick, delay);
     };
 
-    timer = setTimeout(tick, delay);
+    timer = setTimeout(tick, 1200);
     return () => {
       stopped = true;
       clearTimeout(timer);
     };
-  }, [finish, job, loadCredits, phase]);
+  }, [finishJob, hasRunning, loadCredits]);
 
-  useEffect(() => {
-    if (!job || phase !== "developing") return;
-    setElapsed(Date.now() - job.startedAt);
-    const id = setInterval(() => setElapsed(Date.now() - job.startedAt), 500);
-    return () => clearInterval(id);
-  }, [job, phase]);
-
-  const retry = useCallback(() => {
-    const last = lastRequest.current;
-    setJobError(null);
-    setPhase("idle");
-    if (!last) return;
-    setModelId(last.modelId);
-    setAspect(last.aspect);
-    setPrompt(last.prompt);
-    void runGeneration(last.prompt, last.modelId, last.aspect);
-  }, [runGeneration]);
-
-  /* ── gallery ────────────────────────────────────────────── */
+  /* ── gallery (local history only) ───────────────────────── */
   const gallery = useMemo(() => {
     const q = query.trim().toLowerCase();
     return results.filter(
@@ -484,8 +530,22 @@ export function Studio({
     setLightbox(i >= 0 ? i : null);
   };
 
+  const clearHistory = async () => {
+    const ok = await confirm({
+      title: "ล้างประวัติในเครื่องนี้?",
+      body: "รูปและลิงก์ที่เก็บในเบราว์เซอร์นี้จะหายไป (ยังอยู่ในฐานข้อมูลกลางและหน้าแอดมิน)",
+      okLabel: "ล้างประวัติ",
+      danger: true,
+    });
+    if (!ok) return;
+    setResults([]);
+    setCurrent(null);
+    writeLocal(HISTORY_KEY, []);
+    toast("ล้างประวัติในเครื่องแล้ว", "ok");
+  };
+
   const creditClass = !credits?.known ? "" : credits.total === 0 ? "out" : credits.total < 30 ? "low" : "";
-  const activeItem = busy ? null : current;
+  const activeItem = focus ? null : current;
 
   return (
     <>
@@ -541,6 +601,11 @@ export function Studio({
               <h2 className="panel-title" id="setup-title">
                 สร้างภาพ
               </h2>
+              {running.length > 0 && (
+                <span className="pill chem" style={{ marginLeft: "auto" }}>
+                  กำลังสร้าง {running.length}/{MAX_JOBS}
+                </span>
+              )}
             </div>
             <div className="panel-body">
               <div className="block">
@@ -557,7 +622,6 @@ export function Studio({
                       aria-checked={modelId === m.id}
                       className="model"
                       onClick={() => setModelId(m.id)}
-                      disabled={busy}
                     >
                       <span className="model-radio" aria-hidden="true" />
                       <span>
@@ -588,7 +652,6 @@ export function Studio({
                           aria-checked={aspect === a}
                           className="aspect"
                           onClick={() => setAspect(a)}
-                          disabled={busy}
                           title={`สัดส่วน ${a}`}
                         >
                           <span className="aspect-box">
@@ -618,7 +681,7 @@ export function Studio({
                     onKeyDown={(e) => {
                       if ((e.ctrlKey || e.metaKey) && e.key === "Enter" && canGo) {
                         e.preventDefault();
-                        void submit();
+                        submit();
                       }
                     }}
                     placeholder="เช่น หญิงสาวในเสื้อกันฝนสีเหลืองยืนกลางตลาดกลางคืนฝนตก แสงนีออนสีส้มสะท้อนพื้นเปียก ภาพถ่ายฟิล์ม 35mm เกรนละเอียด"
@@ -652,7 +715,7 @@ export function Studio({
                     setDragging(false);
                     void addFiles([...e.dataTransfer.files]);
                   }}
-                  disabled={busy || refs.length >= spec.maxFiles}
+                  disabled={refs.length >= spec.maxFiles}
                 >
                   <Upload />
                   <span className="drop-txt">
@@ -714,13 +777,17 @@ export function Studio({
             </div>
 
             <div className="panel-foot">
-              <button className="go" onClick={() => void submit()} disabled={!canGo}>
-                {phase === "sending" ? <span className="spinner" style={{ borderTopColor: "var(--safe-ink)" }} /> : <Zap />}
-                {phase === "sending" ? "กำลังส่งคำสั่ง…" : phase === "developing" ? "กำลังสร้างภาพ…" : "สร้างภาพ"}
+              <button className="go" onClick={submit} disabled={!canGo}>
+                <Zap />
+                สร้างภาพ
                 <span className="cost">−{spec.cost} เครดิต</span>
               </button>
 
-              {shortCredits ? (
+              {!canAdd ? (
+                <p className="go-note warn">
+                  <Alert /> มีงานกำลังสร้าง {running.length} งาน (สูงสุด {MAX_JOBS}) — รอให้เสร็จก่อนจึงเริ่มใหม่ได้
+                </p>
+              ) : shortCredits ? (
                 <p className="go-note warn">
                   <Alert /> เครดิตรวมไม่พอสำหรับ {spec.label} ({spec.cost} เครดิต) — เครดิตรีเซ็ตทุกวัน 11:00 น.
                   หรือเลือกโมเดลที่ถูกลง
@@ -742,51 +809,14 @@ export function Studio({
                 </p>
               ) : (
                 <p className="go-note">
-                  <Info /> ระบบเลือกบัญชีที่เครดิตพอให้อัตโนมัติ · สร้างภาพที่ {RESOLUTION} · ใช้เวลาราว 15–90 วินาที
+                  <Info /> กดสร้างซ้ำได้เลยระหว่างรอ — สร้างพร้อมกันได้ถึง {MAX_JOBS} งาน · {RESOLUTION} · ราว 15–90
+                  วินาที/งาน
                 </p>
-              )}
-
-              {(busy || phase === "failed") && (
-                <div className="job">
-                  <div className="steps">
-                    <span className={`step ${phase === "sending" ? "on" : "done"}`}>
-                      <span className="step-dot">{phase === "sending" ? "1" : <Check />}</span> ส่งคำสั่ง
-                    </span>
-                    <span className="step-line" />
-                    <span className={`step ${phase === "developing" ? "on" : ""}`}>
-                      <span className="step-dot">2</span> โมเดลวาดภาพ
-                    </span>
-                    <span className="step-line" />
-                    <span className="step">
-                      <span className="step-dot">3</span> สร้างเสร็จ
-                    </span>
-                  </div>
-                  {phase !== "failed" && (
-                    <div className="job-msg">
-                      <span className="spinner" />
-                      <span>
-                        {phase === "sending" ? "กำลังส่งพรอมป์เข้าคิว…" : "โมเดลกำลังวาดภาพ หน้านี้ปิดแล้วกลับมาต่อได้"}
-                      </span>
-                      {phase === "developing" && <span className="t">{fmtClock(elapsed)}</span>}
-                    </div>
-                  )}
-                  {phase === "failed" && jobError && (
-                    <div className="alert bad">
-                      <Alert />
-                      <span>
-                        {jobError}
-                        <button className="btn sm ghost" onClick={retry} style={{ marginLeft: 8 }}>
-                          <Refresh /> ลองอีกครั้ง
-                        </button>
-                      </span>
-                    </div>
-                  )}
-                </div>
               )}
             </div>
           </section>
 
-          {/* ── light table ── */}
+          {/* ── results ── */}
           <section className="panel lighttable" aria-labelledby="table-title">
             <div className="panel-head">
               <span className="panel-idx">02</span>
@@ -794,20 +824,21 @@ export function Studio({
                 ผลลัพธ์
               </h2>
               <span className="spacer" />
-              {job && <span className="tag warn">กำลังสร้าง</span>}
-              {!job && activeItem && <span className="tag ok">พร้อมใช้งาน</span>}
+              {running.length > 0 && <span className="tag warn">กำลังสร้าง {running.length}</span>}
+              {!running.length && activeItem && <span className="tag ok">พร้อมใช้งาน</span>}
             </div>
 
             <div className="frame">
-              {phase === "developing" || phase === "sending" ? (
+              {focus ? (
                 <div className="developing">
                   <div className="developing-txt">
-                    <div className="big">{job?.modelLabel || spec.label} กำลังวาดภาพ</div>
+                    <div className="big">{focus.modelLabel} กำลังสร้างภาพ</div>
                     <div className="small">
-                      {job?.aspect || aspect} · {RESOLUTION}
-                      {job?.refCount ? ` · อ้างอิง ${job.refCount} รูป` : ""}
+                      {focus.aspect} · {RESOLUTION}
+                      {focus.refCount ? ` · อ้างอิง ${focus.refCount} รูป` : ""}
+                      {running.length > 1 ? ` · พร้อมกัน ${running.length} งาน` : ""}
                     </div>
-                    <div className="timer">{fmtClock(elapsed)}</div>
+                    <div className="timer">{fmtClock(now - focus.startedAt)}</div>
                     <span className="spinner" />
                   </div>
                 </div>
@@ -817,10 +848,10 @@ export function Studio({
               ) : (
                 <div className="frame-empty">
                   <ImageIcon />
-                  <h3>ยังไม่มีภาพ</h3>
+                  <h3>ยังไม่มีภาพในรอบนี้</h3>
                   <p>
-                    เลือกโมเดลและสัดส่วน เขียนพรอมป์ทางซ้าย จะแนบรูปอ้างอิงเพื่อคงโครงเดิมก็ได้
-                    จากนั้นกด “สร้างภาพ” — หรือเริ่มจากไอเดียด้านล่าง
+                    เขียนพรอมป์ทางซ้ายแล้วกด “สร้างภาพ” — ภาพที่สร้างจะแสดงที่นี่และเก็บประวัติไว้ในเครื่องนี้
+                    {results.length > 0 ? " (ภาพเก่าอยู่ใน “ภาพทั้งหมด” ด้านล่าง)" : ""}
                   </p>
                   <div className="ideas">
                     {IDEAS.map((idea) => (
@@ -841,6 +872,43 @@ export function Studio({
               )}
             </div>
 
+            {jobs.length > 0 && (
+              <div className="joblist">
+                {jobs.map((j) => (
+                  <div key={j.key} className={`jobrow ${j.status === "failed" ? "failed" : ""}`}>
+                    {j.status === "failed" ? (
+                      <Alert style={{ color: "var(--bad)" }} />
+                    ) : j.status === "sending" ? (
+                      <span className="spinner" />
+                    ) : (
+                      <span className="spinner" />
+                    )}
+                    <span className="jp" title={j.prompt}>
+                      {j.prompt}
+                    </span>
+                    <span className="jm">
+                      {j.modelLabel} · {j.aspect}
+                    </span>
+                    {j.status === "failed" ? (
+                      <>
+                        <span className="err" title={j.error}>
+                          {j.error?.slice(0, 40)}
+                        </span>
+                        <button className="iconbtn sm" onClick={() => retryJob(j)} aria-label="ลองสร้างงานนี้ใหม่">
+                          <Refresh />
+                        </button>
+                        <button className="iconbtn sm" onClick={() => dismissJob(j.key)} aria-label="ปิดงานที่ล้มเหลว">
+                          <X />
+                        </button>
+                      </>
+                    ) : (
+                      <span className="t">{fmtClock(now - j.startedAt)}</span>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+
             {activeItem && (
               <>
                 <div className="result-bar">
@@ -860,7 +928,7 @@ export function Studio({
                   >
                     <Pencil /> แก้พรอมป์นี้
                   </button>
-                  <button className="btn" onClick={() => void useAsReference(activeItem)} disabled={refBusy || busy}>
+                  <button className="btn" onClick={() => void useAsReference(activeItem)} disabled={refBusy}>
                     <Clip /> ใช้อ้างอิง
                   </button>
                   <button
@@ -901,12 +969,12 @@ export function Studio({
           </section>
         </div>
 
-        {/* ── contact sheet ── */}
+        {/* ── my history (local) ── */}
         <section className="panel sheet" aria-labelledby="sheet-title">
           <div className="panel-head">
             <span className="panel-idx">03</span>
             <h2 className="panel-title" id="sheet-title">
-              ภาพทั้งหมด
+              ภาพทั้งหมดของฉัน
             </h2>
             <span className="chip">
               <Grid /> {fmtNum(gallery.length)} ภาพ
@@ -941,13 +1009,18 @@ export function Studio({
                 ))}
               </select>
             )}
+            {results.length > 0 && (
+              <button className="btn sm ghost" onClick={() => void clearHistory()} title="ลบประวัติที่เก็บในเบราว์เซอร์นี้">
+                <Trash /> ล้างประวัติ
+              </button>
+            )}
           </div>
           <div className="panel-body">
             {gallery.length === 0 ? (
               <div className="empty">
                 <Film />
                 {results.length === 0
-                  ? "ยังไม่มีภาพ — ภาพแรกที่สร้างเสร็จจะขึ้นที่นี่และเก็บไว้ให้ทุกคนเห็น"
+                  ? "ยังไม่มีประวัติในเครื่องนี้ — ภาพที่สร้างจะถูกเก็บไว้ในเบราว์เซอร์นี้คนเดียว"
                   : "ไม่พบภาพที่ตรงกับคำค้นหรือตัวกรองนี้"}
               </div>
             ) : (
@@ -982,7 +1055,7 @@ export function Studio({
           <i className="sep" />
           <span>เครดิตทุกบัญชีรีเซ็ต 11:00 น. เวลาไทย</span>
           <i className="sep" />
-          <span className="foot-note">ภาพถูกเก็บในฐานข้อมูลกลางของเซิร์ฟเวอร์</span>
+          <span className="foot-note">ประวัติภาพเก็บในเบราว์เซอร์นี้ · เซิร์ฟเวอร์เก็บไว้ให้แอดมิน</span>
           <span style={{ marginLeft: "auto" }}>
             <Link className="textlink" href="/admin">
               <Lock /> ผู้ดูแลระบบ
@@ -1007,7 +1080,7 @@ export function Studio({
             setLightbox(null);
             void useAsReference(item);
           }}
-          busyRef={refBusy || busy}
+          busyRef={refBusy}
         />
       )}
     </>

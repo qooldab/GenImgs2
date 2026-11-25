@@ -295,8 +295,16 @@ textarea.prompt:focus { outline: none; border-color: var(--safe); }
 .developing-txt .timer { font-family: var(--font-mono); font-size: 26px; font-variant-numeric: tabular-nums; color: var(--safe-2); margin-top: 10px; }
 .developing-txt .spinner { margin: 14px auto 0; }
 
-.result-bar { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; padding: 0 16px 14px; }
-.btn {
+.joblist { display: flex; flex-direction: column; gap: 6px; padding: 0 16px 14px; }
+.jobrow { display: flex; align-items: center; gap: 8px; font-size: 12px; border: 1px solid var(--line); border-radius: var(--r-sm); padding: 7px 9px; background: var(--ink-850); }
+.jobrow.failed { border-color: rgba(255, 122, 112, 0.35); background: rgba(255, 122, 112, 0.06); }
+.jobrow .jp { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--paper-2); }
+.jobrow .jm { font-family: var(--font-mono); font-size: 10.5px; color: var(--paper-4); white-space: nowrap; }
+.jobrow .t { font-family: var(--font-mono); font-variant-numeric: tabular-nums; color: var(--paper-3); }
+.jobrow .err { color: var(--bad); font-size: 11px; max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.jobrow svg { width: 14px; height: 14px; }
+
+.result-bar { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; padding: 0 16px 14px; }.btn {
   display: inline-flex; align-items: center; gap: 7px; padding: 8px 12px;
   border: 1px solid var(--line-2); border-radius: var(--r-md); background: var(--ink-750);
   font-size: 13px; color: var(--paper); transition: background var(--fast), border-color var(--fast), color var(--fast);
@@ -525,6 +533,7 @@ input[type="checkbox"].cb:focus-visible { outline: 2px solid var(--safe-2); outl
 @media (max-width: 600px) {
   .adminpill { display: none; }
   .foot-note { display: none; }
+  .jobrow .jm { display: none; }
   .topbar-in { gap: 8px; }
   .textlink { padding: 7px 9px; }
 }
